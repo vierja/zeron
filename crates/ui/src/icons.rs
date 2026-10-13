@@ -228,6 +228,7 @@ icon_assets![
     (PI_MARK, "pi-mark"),
     (OPENCODE_MARK, "opencode-mark"),
     (ANTIGRAVITY_MARK, "antigravity-mark"),
+    (MUSE_MARK, "muse-mark"),
 ];
 
 /// Serves both the compact control-icon set and the complete file-identity
