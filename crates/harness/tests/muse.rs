@@ -173,6 +173,34 @@ async fn failed_turn_reports_the_host_error() {
     )));
 }
 
+/// The engine injects Zeron's MCP server into every real run; the host
+/// refuses it without the `sessionMcp` capability grant at initialize.
+/// (Regression: real runs died at session/start and the stream closed
+/// without a `Done` — "harness stream ended without Done".)
+#[tokio::test]
+async fn mcp_injected_runs_start_and_complete() {
+    let (controls, _steer, _token) = controls("Alpha");
+    let mut req = request("hello with tools");
+    req.mcp = Some(zeron_proto::McpServer {
+        name: "zeron".into(),
+        command: "/bin/echo".into(),
+        args: vec!["hi".into()],
+        env: Default::default(),
+    });
+    let events = run_first_turn(&harness(), req, controls).await;
+    assert_eq!(texts(&events), "echo: hello with tools");
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            AgentEvent::Done {
+                status: DoneStatus::Completed,
+                ..
+            }
+        )),
+        "{events:?}"
+    );
+}
+
 #[tokio::test]
 async fn leading_skill_invocation_becomes_a_native_skill_part() {
     let (controls, _steer, _token) = controls("Alpha");
@@ -237,13 +265,31 @@ async fn live_echo_turn_from_real_muse() {
     let harness = MuseHarness::new().with_executable(&shim);
     let (controls, _steer, _token) = controls("Alpha");
     let mut req = request("hello live muse");
+    // Mirror the real engine: it always injects its MCP server. The host
+    // really starts it, so it must speak just enough MCP to initialize.
+    let mcp_py = dir.path().join("fake_mcp.py");
+    std::fs::write(
+        &mcp_py,
+        "import json, sys\nfor line in sys.stdin:\n    try: m = json.loads(line)\n    except Exception: continue\n    if 'id' not in m: continue\n    r = {'protocolVersion': '2024-11-05', 'capabilities': {}, 'serverInfo': {'name': 'fake', 'version': '0'}} if m.get('method') == 'initialize' else ({'tools': []} if m.get('method') == 'tools/list' else {})\n    print(json.dumps({'jsonrpc': '2.0', 'id': m['id'], 'result': r}), flush=True)\n",
+    )
+    .expect("fake mcp server");
+    req.mcp = Some(zeron_proto::McpServer {
+        name: "zeron".into(),
+        command: "python3".into(),
+        args: vec![mcp_py.to_string_lossy().into_owned()],
+        env: Default::default(),
+    });
     req.cwd = dir.path().to_string_lossy().into_owned();
     let events = run_first_turn(&harness, req, controls).await;
     assert_eq!(texts(&events), "echo: hello live muse", "{events:?}");
     assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, AgentEvent::Done { status: DoneStatus::Completed, .. })),
+        events.iter().any(|e| matches!(
+            e,
+            AgentEvent::Done {
+                status: DoneStatus::Completed,
+                ..
+            }
+        )),
         "{events:?}"
     );
 }

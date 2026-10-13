@@ -256,6 +256,11 @@ pub fn claude_brand() -> Hsla {
     gpui::rgb(0xD97757).into()
 }
 
+/// The Meta mark's brand blue (`#0064E0`), same treatment as Claude's.
+pub fn meta_brand() -> Hsla {
+    gpui::rgb(0x0064E0).into()
+}
+
 /// An icon element for an embedded asset path. Size and colour are set by the
 /// caller (`.size(..)`, `.text_color(..)`), matching the web app's
 /// `[&_svg]:size-4` idiom.

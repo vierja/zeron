@@ -76,6 +76,8 @@ def run_turn(params):
     notify("turn/completed", {"sessionId": SESSION_ID, "viewCursor": "9", "sourceRange": {}, "turnId": turn_id, "terminal": "completed"})
 
 
+granted = []
+
 for line in sys.stdin:
     line = line.strip()
     if not line:
@@ -84,12 +86,17 @@ for line in sys.stdin:
     method = msg.get("method")
     req_id = msg.get("id")
     if method == "initialize":
-        result(req_id, {"serverInfo": {"name": "muse", "version": "0.0.0-fake"}, "userAgent": "fake", "museHome": "/tmp", "platformFamily": "unix", "platformOs": "macos", "schema": {"version": 1, "fingerprint": "fake"}, "grantedCapabilities": [], "experimentalApi": False})
+        wanted = msg.get("params", {}).get("capabilities", {}).get("requestedCapabilities", [])
+        granted = [c for c in wanted if c == "sessionMcp"]
+        result(req_id, {"serverInfo": {"name": "muse", "version": "0.0.0-fake"}, "userAgent": "fake", "museHome": "/tmp", "platformFamily": "unix", "platformOs": "macos", "schema": {"version": 1, "fingerprint": "fake"}, "grantedCapabilities": granted, "experimentalApi": False})
     elif method == "model/list":
         result(req_id, {"providerId": "fake", "profileId": None, "source": "fake", "models": [
             {"modelId": "muse-fake-1", "displayLabel": "Fake One", "providerId": "fake", "profileId": None, "releaseDate": None, "description": None, "contextLimit": 100000, "outputLimit": None, "cost": None, "isActive": False, "isDefault": True, "variants": "unknown"},
         ]})
     elif method in ("session/start", "session/resume"):
+        if (msg["params"].get("config") or {}).get("mcpServers") and "sessionMcp" not in granted:
+            emit({"jsonrpc": "2.0", "id": req_id, "error": {"code": -32010, "message": "session MCP configuration requires the sessionMcp capability", "data": {"kind": "capabilityRequired", "capability": "sessionMcp"}}})
+            continue
         if method == "session/resume" and msg["params"].get("sessionId") == "missing-session":
             emit({"jsonrpc": "2.0", "id": req_id, "error": {"code": -32000, "message": "no such session"}})
             continue

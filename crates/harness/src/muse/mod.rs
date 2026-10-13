@@ -230,7 +230,10 @@ impl MuseHarness {
                 "initialize",
                 json!({
                     "clientInfo": {"name": "zeron", "version": env!("CARGO_PKG_VERSION")},
-                    "capabilities": {},
+                    // `sessionMcp` gates the `config.mcpServers` member of
+                    // session/start; without the grant the host rejects the
+                    // start outright (-32010 capabilityRequired).
+                    "capabilities": {"requestedCapabilities": ["sessionMcp"]},
                 }),
             )
             .await?;
@@ -468,7 +471,7 @@ impl Harness for MuseHarness {
                 norm: Normalizer::default(),
                 session_id: String::new(),
                 turn_id: None,
-                turn_active: false,
+                done_pending: true,
                 skill_names: Vec::new(),
                 assistant: uuid::Uuid::new_v4().to_string(),
                 done_sent: false,
@@ -489,7 +492,7 @@ impl Harness for MuseHarness {
                 } else {
                     error.to_string()
                 };
-                if !runner.done_sent && runner.turn_active {
+                if runner.done_pending {
                     let _ = tx
                         .send(Ok(AgentEvent::Done {
                             status: DoneStatus::Errored,
@@ -561,7 +564,8 @@ struct Runner<'a> {
     norm: Normalizer,
     session_id: String,
     turn_id: Option<String>,
-    turn_active: bool,
+    /// A turn (including the first, still in setup) owes the engine a `Done`.
+    done_pending: bool,
     skill_names: Vec<String>,
     assistant: String,
     done_sent: bool,
@@ -608,6 +612,7 @@ impl Runner<'_> {
         } else {
             None
         };
+        let mut mcp_dropped = false;
         let session = match session {
             Some(value) => value,
             None => {
@@ -619,10 +624,29 @@ impl Runner<'_> {
                 if let Some(model) = request.model.as_deref().filter(|m| *m != "default") {
                     params["modelId"] = model.into();
                 }
+                let has_mcp = mcp_config(&request).is_some();
                 if let Some(config) = mcp_config(&request) {
                     params["config"] = config;
                 }
-                self.host.client.request("session/start", params).await?
+                match self
+                    .host
+                    .client
+                    .request("session/start", params.clone())
+                    .await
+                {
+                    Ok(value) => value,
+                    // A host that still refuses the MCP config (older build,
+                    // capability not granted) must not kill the chat: start
+                    // without Zeron's tools and say so in the transcript.
+                    Err(error) if has_mcp => {
+                        tracing::warn!(%error, "muse session/start refused the MCP config; retrying without it");
+                        params.as_object_mut().map(|o| o.remove("config"));
+                        params["commandId"] = command_id().into();
+                        mcp_dropped = true;
+                        self.host.client.request("session/start", params).await?
+                    }
+                    Err(error) => return Err(error),
+                }
             }
         };
         self.session_id = session
@@ -688,6 +712,12 @@ impl Runner<'_> {
             })
             .await?;
         }
+        if mcp_dropped {
+            self.emit(AgentEvent::TextDelta {
+                text: "_The Muse host refused Zeron's MCP server config; this session runs without Zeron tools._\n\n".into(),
+            })
+            .await?;
+        }
         self.start_turn(&request.prompt, &request.attachments, request.reasoning)
             .await?;
 
@@ -702,7 +732,7 @@ impl Runner<'_> {
                             }
                             if is_terminal {
                                 self.turn_id = None;
-                                self.turn_active = false;
+                                self.done_pending = false;
                                 self.done_sent = true;
                                 self.emit(AgentEvent::Done {
                                     status: self.norm.status(),
@@ -754,7 +784,7 @@ impl Runner<'_> {
             .get("turnId")
             .and_then(Value::as_str)
             .map(str::to_owned);
-        self.turn_active = true;
+        self.done_pending = true;
         Ok(())
     }
 
@@ -829,6 +859,7 @@ impl Runner<'_> {
                 .await;
         }
         self.done_sent = true;
+        self.done_pending = false;
         let _ = self
             .emit(AgentEvent::Done {
                 status: DoneStatus::Interrupted,
